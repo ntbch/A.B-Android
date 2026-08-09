@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">A.B</string>
+    <string name="notification_listener_label">A.B notification access</string>
+    <string name="run_local_assistant">Chạy trợ lý cục bộ</string>
+    <string name="device_capabilities">Khả năng thiết bị</string>
+    <string name="enable_notification_access">Bật truy cập thông báo</string>
+    <string name="loading_model">Đang nạp model…</string>
+    <string name="generating_locally">Đang xử lý cục bộ…</string>
+    <string name="executing_device_command">Đang thực hiện lệnh thiết bị…</string>
+    <string name="permission_denied">Quyền bị từ chối. Yêu cầu không được thực hiện.</string>
+    <string name="confirm_action">Xác nhận</string>
+    <string name="cancel_action">Hủy</string>
+    <string name="action_cancelled">Đã hủy hành động.</string>
+    <string name="notification_settings_unavailable">Thiết bị không có màn hình cài đặt truy cập thông báo.</string>
+    <string name="model_loading_status">%1$s
+%2$s
+%3$s
+%4$s</string>
+    <string name="model_ready_status">%1$s
+%2$s
+%3$s</string>
+</resources>
