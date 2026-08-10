@@ -1,13 +1,17 @@
 package com.ab.assistant.web
 
-import android.text.Html
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
-data class WebSearchEntry(val title: String, val snippet: String)
+data class WebSearchEntry(
+    val title: String,
+    val snippet: String,
+    val id: String = "",
+    val sourceUrl: String = "",
+)
 
 sealed interface WebSearchResponse {
     data class Success(val entries: List<WebSearchEntry>) : WebSearchResponse
@@ -38,7 +42,7 @@ class BingRssSearchClient : WebSearchClient {
                     return WebSearchResponse.Failure("Dịch vụ tìm kiếm trả về lỗi ${http.responseCode}.")
                 }
                 val html = http.inputStream.use(::readLimitedUtf8)
-                val entries = extractEntries(html)
+                val entries = WebSearchResultParser.parse(html)
                 if (entries.isEmpty()) WebSearchResponse.Failure("Không tìm thấy kết quả phù hợp.")
                 else WebSearchResponse.Success(entries)
             } finally {
@@ -53,14 +57,6 @@ class BingRssSearchClient : WebSearchClient {
         }
     }
 
-    private fun extractEntries(html: String): List<WebSearchEntry> {
-        return itemPattern.findAll(html)
-            .map { match -> WebSearchEntry(cleanHtml(match.groupValues[1]), cleanHtml(match.groupValues[2])) }
-            .filter { it.title.isNotBlank() }
-            .take(MAX_RESULTS)
-            .toList()
-    }
-
     private fun readLimitedUtf8(input: java.io.InputStream): String {
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(8192)
@@ -72,22 +68,9 @@ class BingRssSearchClient : WebSearchClient {
         return output.toString(StandardCharsets.UTF_8.name())
     }
 
-    private fun cleanHtml(value: String): String = Html.fromHtml(
-        value.removePrefix("<![CDATA[").removeSuffix("]]>") ,
-        Html.FROM_HTML_MODE_LEGACY,
-    )
-        .toString()
-        .replace(Regex("\\s+"), " ")
-        .trim()
-
     private companion object {
         const val CONNECT_TIMEOUT_MILLIS = 8_000
         const val READ_TIMEOUT_MILLIS = 8_000
         const val MAX_RESPONSE_BYTES = 256 * 1024
-        const val MAX_RESULTS = 3
-        val itemPattern = Regex(
-            """<item>.*?<title>(.*?)</title>.*?<description>(.*?)</description>.*?</item>""",
-            RegexOption.DOT_MATCHES_ALL,
-        )
     }
 }

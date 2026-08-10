@@ -4,11 +4,13 @@ import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.BatteryManager
 import android.provider.AlarmClock
 import android.telephony.SmsManager
 import android.view.KeyEvent
@@ -19,6 +21,8 @@ import com.ab.assistant.notifications.NotificationStore
 import com.ab.assistant.web.BingRssSearchClient
 import com.ab.assistant.web.WebSearchClient
 import com.ab.assistant.web.WebSearchResponse
+import com.ab.assistant.state.Capability
+import com.ab.assistant.state.CapabilityCoordinator
 import java.text.Normalizer
 import java.util.Locale
 
@@ -27,6 +31,7 @@ class ToolRegistry(
     private val flashlight: FlashlightController = FlashlightController(context),
     private val contactLookup: ContactLookup = ContactLookup(context),
     private val webSearchClient: WebSearchClient = BingRssSearchClient(),
+    private val capabilityCoordinator: CapabilityCoordinator? = null,
 ) : ToolExecutor {
     override fun requiredPermission(command: ToolCommand): String? = when (command) {
         ToolCommand.FlashlightOn, ToolCommand.FlashlightOff -> Manifest.permission.CAMERA
@@ -59,17 +64,21 @@ class ToolRegistry(
     override fun isAvailable(command: ToolCommand): Boolean = when (command) {
         ToolCommand.FlashlightOn, ToolCommand.FlashlightOff -> flashlight.isAvailable()
         is ToolCommand.OpenApp -> launchableActivities().isNotEmpty()
-        is ToolCommand.SetVolume, is ToolCommand.Media -> audioManager() != null
+        is ToolCommand.SetVolume, is ToolCommand.AdjustVolume, is ToolCommand.Media -> audioManager() != null
         is ToolCommand.SetTimer -> hasHandler(Intent(AlarmClock.ACTION_SET_TIMER))
         is ToolCommand.SetAlarm -> hasHandler(Intent(AlarmClock.ACTION_SET_ALARM))
-        is ToolCommand.ReadNotifications -> AbNotificationListenerService.isAccessEnabled(context)
+        is ToolCommand.ReadNotifications -> capabilityCoordinator?.isReady(Capability.NOTIFICATIONS)
+            ?: AbNotificationListenerService.isAccessEnabled(context)
         is ToolCommand.FindContact -> true
-        is ToolCommand.WebSearch -> isNetworkAvailable()
+        is ToolCommand.WebSearch -> capabilityCoordinator?.isReady(Capability.NETWORK) ?: isNetworkAvailable()
         is ToolCommand.SendSms -> smsManager() != null
         is ToolCommand.DialContact -> hasHandler(Intent(Intent.ACTION_DIAL))
+        ToolCommand.ReadDeviceState -> context.getSystemService(BatteryManager::class.java) != null
     }
 
     override fun unavailableMessage(command: ToolCommand): String = when (command) {
+        is ToolCommand.AdjustVolume -> "Audio service unavailable."
+        ToolCommand.ReadDeviceState -> "Device state unavailable."
         ToolCommand.FlashlightOn, ToolCommand.FlashlightOff -> "Thiết bị không có đèn flash khả dụng."
         is ToolCommand.OpenApp -> "Không tìm thấy ứng dụng có thể mở."
         is ToolCommand.SetVolume, is ToolCommand.Media -> "Không có dịch vụ âm thanh khả dụng."
@@ -83,9 +92,10 @@ class ToolRegistry(
     }
 
     override fun execute(command: ToolCommand): ToolExecutionResult = when (command) {
-        ToolCommand.FlashlightOn, ToolCommand.FlashlightOff -> ToolExecutionResult(flashlight.execute(command))
+        ToolCommand.FlashlightOn, ToolCommand.FlashlightOff -> flashlightResult(command)
         is ToolCommand.OpenApp -> openApp(command.appName)
         is ToolCommand.SetVolume -> setVolume(command)
+        is ToolCommand.AdjustVolume -> adjustVolume(command)
         is ToolCommand.Media -> media(command.action)
         is ToolCommand.SetTimer -> setTimer(command.durationMinutes)
         is ToolCommand.SetAlarm -> setAlarm(command)
@@ -94,16 +104,32 @@ class ToolRegistry(
         is ToolCommand.WebSearch -> webSearch(command.query)
         is ToolCommand.SendSms -> sendSms(command)
         is ToolCommand.DialContact -> dialContact(command.recipient)
+        ToolCommand.ReadDeviceState -> readDeviceState()
     }
 
-    override fun requiresConfirmation(command: ToolCommand): Boolean = command is ToolCommand.SendSms
+    override fun requiresConfirmation(command: ToolCommand): Boolean =
+        command is ToolCommand.SendSms || command is ToolCommand.DialContact
 
     override fun confirmationMessage(command: ToolCommand): String = when (command) {
         is ToolCommand.SendSms -> "Xác nhận gửi SMS tới “${command.recipient}”:\n${command.message}"
+        is ToolCommand.DialContact -> "Xác nhận mở trình quay số cho “${command.recipient}”."
         else -> super.confirmationMessage(command)
     }
 
-    fun capabilityStatus(modelBackend: String): String = buildString {
+    private fun flashlightResult(command: ToolCommand): ToolExecutionResult {
+        val message = flashlight.execute(command)
+        if (!message.startsWith("ERROR:", ignoreCase = true)) {
+            return ToolExecutionResult(message, verified = false)
+        }
+        val code = if (message.contains("permission", ignoreCase = true)) {
+            ToolResultCode.PERMISSION_MISSING
+        } else {
+            ToolResultCode.NOT_AVAILABLE
+        }
+        return ToolExecutionResult(message, ok = false, code = code, verified = false)
+    }
+
+    fun capabilityStatus(modelBackend: String): String = capabilityCoordinator?.describe(modelBackend) ?: buildString {
         appendLine("Trạng thái Phase 4")
         appendLine("Mô hình: $modelBackend")
         appendLine("Đèn pin: ${if (flashlight.isAvailable()) "sẵn sàng (cần quyền Camera)" else "không khả dụng"}")
@@ -121,7 +147,7 @@ class ToolRegistry(
 
     private fun openApp(requestedName: String): ToolExecutionResult {
         val query = normalize(requestedName)
-        if (query.isBlank()) return ToolExecutionResult("Tên ứng dụng không hợp lệ.")
+        if (query.isBlank()) return ToolExecutionResult("Tên ứng dụng không hợp lệ.", ok = false, code = ToolResultCode.NOT_AVAILABLE)
         val activities = launchableActivities()
         val exactMatches = activities.filter { activity ->
             normalize(activity.label) == query || normalize(activity.packageName) == query
@@ -131,9 +157,9 @@ class ToolRegistry(
         }
         val target = candidates.distinctBy { it.packageName }.singleOrNull()
             ?: return if (candidates.isEmpty()) {
-                ToolExecutionResult("Không tìm thấy ứng dụng “$requestedName”.")
+                ToolExecutionResult("Không tìm thấy ứng dụng “$requestedName”.", ok = false, code = ToolResultCode.NOT_FOUND)
             } else {
-                ToolExecutionResult("Có nhiều ứng dụng khớp “$requestedName”; hãy nói rõ tên hơn.")
+                ToolExecutionResult("Có nhiều ứng dụng khớp “$requestedName”; hãy nói rõ tên hơn.", ok = false, code = ToolResultCode.AMBIGUOUS)
             }
         val launchIntent = context.packageManager.getLaunchIntentForPackage(target.packageName)
             ?: Intent(Intent.ACTION_MAIN)
@@ -142,7 +168,7 @@ class ToolRegistry(
         return try {
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(launchIntent)
-            ToolExecutionResult("Đã mở ${target.label}.")
+            ToolExecutionResult("Đã gửi yêu cầu mở ${target.label}.", verified = false)
         } catch (_: Exception) {
             ToolExecutionResult("Không thể mở ${target.label}.")
         }
@@ -160,10 +186,57 @@ class ToolRegistry(
         val target = (maximum * command.level / 100.0).toInt().coerceIn(0, maximum)
         return try {
             manager.setStreamVolume(stream, target, 0)
-            ToolExecutionResult("Đã đặt âm lượng ${command.stream.name.lowercase(Locale.ROOT)} thành ${command.level}%.")
+            val verified = manager.getStreamVolume(stream) == target
+            if (verified) {
+                ToolExecutionResult("Đã đặt âm lượng ${command.stream.name.lowercase(Locale.ROOT)} thành ${command.level}%.")
+            } else {
+                ToolExecutionResult(
+                    "Đã gửi yêu cầu đặt âm lượng nhưng chưa xác minh được mức đích.",
+                    ok = false,
+                    code = ToolResultCode.NOT_AVAILABLE,
+                    verified = false,
+                )
+            }
         } catch (_: SecurityException) {
-            ToolExecutionResult("Không có quyền thay đổi âm lượng.")
+            ToolExecutionResult("Không có quyền thay đổi âm lượng.", ok = false, code = ToolResultCode.PERMISSION_MISSING)
         }
+    }
+
+    private fun adjustVolume(command: ToolCommand.AdjustVolume): ToolExecutionResult {
+        val manager = audioManager() ?: return ToolExecutionResult(unavailableMessage(command))
+        val stream = when (command.stream) {
+            VolumeStream.MUSIC -> AudioManager.STREAM_MUSIC
+            VolumeStream.RING -> AudioManager.STREAM_RING
+            VolumeStream.ALARM -> AudioManager.STREAM_ALARM
+            VolumeStream.NOTIFICATION -> AudioManager.STREAM_NOTIFICATION
+        }
+        val direction = when (command.adjustment) {
+            VolumeAdjustment.UP -> AudioManager.ADJUST_RAISE
+            VolumeAdjustment.DOWN -> AudioManager.ADJUST_LOWER
+        }
+        return try {
+            manager.adjustStreamVolume(stream, direction, 0)
+            ToolExecutionResult("Volume ${command.adjustment.name.lowercase(Locale.ROOT)} sent.")
+        } catch (_: SecurityException) {
+            ToolExecutionResult("No permission to change volume.", ok = false)
+        }
+    }
+
+    private fun readDeviceState(): ToolExecutionResult {
+        val manager = context.getSystemService(BatteryManager::class.java)
+            ?: return ToolExecutionResult(unavailableMessage(ToolCommand.ReadDeviceState), ok = false)
+        val battery = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+            .takeIf { it in 0..100 }
+            ?: battery?.let {
+                val current = it.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val scale = it.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                if (current >= 0 && scale > 0) current * 100 / scale else -1
+            }
+        if (level == null || level < 0) return ToolExecutionResult("Battery percentage unavailable.", ok = false)
+        val status = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        return ToolExecutionResult("Battery $level%, ${if (charging) "charging" else "not charging"}.")
     }
 
     private fun media(action: MediaAction): ToolExecutionResult {
@@ -177,9 +250,9 @@ class ToolRegistry(
         return try {
             manager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
             manager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-            ToolExecutionResult("Đã gửi lệnh ${action.name.lowercase(Locale.ROOT)} tới trình phát hiện tại.")
+            ToolExecutionResult("Đã gửi lệnh ${action.name.lowercase(Locale.ROOT)} tới trình phát hiện tại.", verified = false)
         } catch (_: SecurityException) {
-            ToolExecutionResult("Hệ thống không cho phép gửi lệnh media này.")
+            ToolExecutionResult("Hệ thống không cho phép gửi lệnh media này.", ok = false, code = ToolResultCode.NOT_AVAILABLE)
         }
     }
 
@@ -202,10 +275,10 @@ class ToolRegistry(
     }
 
     private fun launchClockIntent(intent: Intent, success: String): ToolExecutionResult = try {
-        if (!hasHandler(intent)) ToolExecutionResult("Ứng dụng Đồng hồ không hỗ trợ yêu cầu này.")
+        if (!hasHandler(intent)) ToolExecutionResult("Ứng dụng Đồng hồ không hỗ trợ yêu cầu này.", ok = false, code = ToolResultCode.NOT_AVAILABLE)
         else {
             context.startActivity(intent)
-            ToolExecutionResult(success)
+            ToolExecutionResult(success, verified = false)
         }
     } catch (_: Exception) {
         ToolExecutionResult("Không thể mở ứng dụng Đồng hồ.")
@@ -215,7 +288,7 @@ class ToolRegistry(
         val notifications = NotificationStore.read(filter)
         if (notifications.isEmpty()) {
             val suffix = filter?.let { " khớp “$it”" }.orEmpty()
-            return ToolExecutionResult("Không có thông báo đang hoạt động$suffix.", code = ToolResultCode.NOT_FOUND)
+            return ToolExecutionResult("Không có thông báo đang hoạt động$suffix.", ok = false, code = ToolResultCode.NOT_FOUND)
         }
         val summary = notifications.joinToString("\n") { item ->
             buildString {
@@ -230,7 +303,7 @@ class ToolRegistry(
     private fun findContact(name: String): ToolExecutionResult = try {
         val matches = contactLookup.find(name)
         when (matches.size) {
-            0 -> ToolExecutionResult("Không tìm thấy liên hệ “$name”.", code = ToolResultCode.NOT_FOUND)
+            0 -> ToolExecutionResult("Không tìm thấy liên hệ “$name”.", ok = false, code = ToolResultCode.NOT_FOUND)
             1 -> ToolExecutionResult("Đã tìm thấy ${matches.single().displayName}: ${matches.single().phoneNumber}.")
             else -> ToolExecutionResult(
                 "Có ${matches.size} liên hệ khớp “$name”:\n" + matches.joinToString("\n") { "• ${it.displayName}: ${it.phoneNumber}" },
@@ -244,7 +317,9 @@ class ToolRegistry(
     private fun webSearch(query: String): ToolExecutionResult = when (val response = webSearchClient.search(query)) {
         is WebSearchResponse.Success -> ToolExecutionResult(
             "Kết quả tìm kiếm cho “$query”\n" + response.entries.mapIndexed { index, entry ->
-                "${index + 1}. ${entry.title}${entry.snippet.takeIf { it.isNotBlank() }?.let { " — $it" }.orEmpty()}"
+                val id = entry.id.ifBlank { "search-${index + 1}" }
+                val source = entry.sourceUrl.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
+                "${index + 1}. [$id] ${entry.title}${entry.snippet.takeIf { it.isNotBlank() }?.let { " — $it" }.orEmpty()}$source"
             }.joinToString("\n"),
         )
         is WebSearchResponse.Failure -> ToolExecutionResult(
@@ -261,11 +336,13 @@ class ToolRegistry(
     private fun sendSms(command: ToolCommand.SendSms): ToolExecutionResult = when (val recipient = resolveRecipient(command.recipient)) {
         is RecipientResolution.NotFound -> ToolExecutionResult(
             "Không tìm thấy liên hệ “${command.recipient}” để gửi SMS.",
+            ok = false,
             code = ToolResultCode.NOT_FOUND,
         )
         is RecipientResolution.Ambiguous -> ToolExecutionResult(
             "Có ${recipient.matches.size} liên hệ khớp “${command.recipient}”; hãy nói rõ tên hơn trước khi gửi: " +
                 recipient.matches.joinToString { it.displayName },
+            ok = false,
             code = ToolResultCode.AMBIGUOUS,
         )
         is RecipientResolution.Single -> try {
@@ -277,7 +354,7 @@ class ToolRegistry(
             } else {
                 manager.sendTextMessage(recipient.match.phoneNumber, null, command.message, null, null)
             }
-            ToolExecutionResult("Đã gửi SMS tới ${recipient.match.displayName}.")
+            ToolExecutionResult("Đã gửi yêu cầu SMS tới ${recipient.match.displayName}.", verified = false)
         } catch (_: SecurityException) {
             ToolExecutionResult("Cần cấp quyền SMS để gửi tin nhắn.", ok = false, code = ToolResultCode.PERMISSION_MISSING)
         } catch (_: IllegalArgumentException) {
@@ -288,11 +365,13 @@ class ToolRegistry(
     private fun dialContact(requestedRecipient: String): ToolExecutionResult = when (val recipient = resolveRecipient(requestedRecipient)) {
         is RecipientResolution.NotFound -> ToolExecutionResult(
             "Không tìm thấy liên hệ “$requestedRecipient” để gọi.",
+            ok = false,
             code = ToolResultCode.NOT_FOUND,
         )
         is RecipientResolution.Ambiguous -> ToolExecutionResult(
             "Có ${recipient.matches.size} liên hệ khớp “$requestedRecipient”; hãy nói rõ tên hơn: " +
                 recipient.matches.joinToString { it.displayName },
+            ok = false,
             code = ToolResultCode.AMBIGUOUS,
         )
         is RecipientResolution.Single -> try {
@@ -300,7 +379,7 @@ class ToolRegistry(
                 Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", recipient.match.phoneNumber, null))
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             )
-            ToolExecutionResult("Đã mở trình quay số cho ${recipient.match.displayName}.")
+            ToolExecutionResult("Đã gửi yêu cầu mở trình quay số cho ${recipient.match.displayName}.", verified = false)
         } catch (_: Exception) {
             ToolExecutionResult("Không thể mở trình quay số.", ok = false, code = ToolResultCode.NOT_AVAILABLE)
         }

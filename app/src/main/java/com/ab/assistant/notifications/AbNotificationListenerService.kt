@@ -7,11 +7,22 @@ import android.os.Build
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import com.ab.assistant.AbApplication
+import com.ab.assistant.state.Capability
+import com.ab.assistant.state.CapabilityState
 
 class AbNotificationListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
+        connected = true
+        (application as? AbApplication)?.capabilityCoordinator?.set(Capability.NOTIFICATIONS, CapabilityState.READY)
         NotificationStore.replaceAll(activeNotifications.orEmpty().map(::toSummary))
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        connected = false
+        (application as? AbApplication)?.refreshCapabilities()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -36,6 +47,11 @@ class AbNotificationListenerService : NotificationListenerService() {
     }
 
     companion object {
+        @Volatile
+        private var connected = false
+
+        fun isConnected(): Boolean = connected
+
         fun isAccessEnabled(context: Context): Boolean {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 val manager = context.getSystemService(android.app.NotificationManager::class.java)

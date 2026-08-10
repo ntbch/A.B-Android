@@ -4,3 +4,17 @@ package com.ab.assistant.agent
 fun interface AgentModel {
     fun generate(prompt: String, onComplete: (String) -> Unit)
 }
+
+data class ModelRequestMetadata(
+    val promptCharacters: Int,
+    val exposedToolCount: Int?,
+    val modelDecisionIndex: Int?,
+)
+
+interface InstrumentedAgentModel : AgentModel {
+    fun generateWithMetadata(
+        prompt: String,
+        metadata: ModelRequestMetadata,
+        onComplete: (String) -> Unit,
+    )
+}

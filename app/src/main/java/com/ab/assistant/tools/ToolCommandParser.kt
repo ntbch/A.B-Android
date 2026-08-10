@@ -10,6 +10,9 @@ object ToolCommandParser {
     private val volumeCommand = Regex(
         "^\\{\\s*\"tool\"\\s*:\\s*\"set_volume\"\\s*,\\s*\"stream\"\\s*:\\s*\"(music|ring|alarm|notification)\"\\s*,\\s*\"level\"\\s*:\\s*(\\d{1,3})\\s*\\}$",
     )
+    private val adjustVolumeCommand = Regex(
+        "^\\{\\s*\"tool\"\\s*:\\s*\"adjust_volume\"\\s*,\\s*\"stream\"\\s*:\\s*\"(music|ring|alarm|notification)\"\\s*,\\s*\"direction\"\\s*:\\s*\"(up|down)\"\\s*\\}$",
+    )
     private val mediaCommand = Regex(
         "^\\{\\s*\"tool\"\\s*:\\s*\"media\"\\s*,\\s*\"action\"\\s*:\\s*\"(play|pause|next|previous)\"\\s*\\}$",
     )
@@ -34,6 +37,9 @@ object ToolCommandParser {
     private val dialContactCommand = Regex(
         "^\\{\\s*\"tool\"\\s*:\\s*\"dial_contact\"\\s*,\\s*\"recipient\"\\s*:\\s*\"([^\"\\\\\\r\\n]{1,80})\"\\s*\\}$",
     )
+    private val deviceStateCommand = Regex(
+        "^\\{\\s*\"tool\"\\s*:\\s*\"device_state\"\\s*\\}$",
+    )
 
     fun parse(modelOutput: String): ToolCommand? {
         val output = modelOutput.trim()
@@ -46,6 +52,15 @@ object ToolCommandParser {
             val level = match.groupValues[2].toInt()
             val stream = VolumeStream.entries.firstOrNull { it.name.lowercase() == match.groupValues[1] }
             if (stream != null && level in 0..100) return ToolCommand.SetVolume(stream, level)
+        }
+        adjustVolumeCommand.matchEntire(output)?.let { match ->
+            val stream = VolumeStream.entries.firstOrNull { it.name.lowercase() == match.groupValues[1] }
+            val adjustment = when (match.groupValues[2]) {
+                "up" -> VolumeAdjustment.UP
+                "down" -> VolumeAdjustment.DOWN
+                else -> null
+            }
+            if (stream != null && adjustment != null) return ToolCommand.AdjustVolume(stream, adjustment)
         }
         mediaCommand.matchEntire(output)?.let { match ->
             val action = MediaAction.entries.firstOrNull { it.name.lowercase() == match.groupValues[1] }
@@ -67,6 +82,7 @@ object ToolCommandParser {
         webSearchCommand.matchEntire(output)?.let { return ToolCommand.WebSearch(it.groupValues[1]) }
         sendSmsCommand.matchEntire(output)?.let { return ToolCommand.SendSms(it.groupValues[1], it.groupValues[2]) }
         dialContactCommand.matchEntire(output)?.let { return ToolCommand.DialContact(it.groupValues[1]) }
+        if (deviceStateCommand.matches(output)) return ToolCommand.ReadDeviceState
         return null
     }
 }

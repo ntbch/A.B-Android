@@ -2,6 +2,7 @@ package com.ab.assistant.agent
 
 import com.ab.assistant.tools.MediaAction
 import com.ab.assistant.tools.ToolCommand
+import com.ab.assistant.tools.VolumeAdjustment
 import com.ab.assistant.tools.VolumeStream
 import java.text.Normalizer
 import java.util.Locale
@@ -16,6 +17,7 @@ object UserCommandParser {
     private val alarm = Regex("(?:bao thuc|alarm).*?\\b(\\d{1,2})(?::|h| gio\\s*)(\\d{1,2})?")
     private val notificationFilter = Regex("(?:thong bao|notification)(?:.*?(?:tu|from)\\s+(.+))?$")
     private val sms = Regex("(?iu)^(?:nh\\u1eafn tin|g\\u1eedi tin nh\\u1eafn|sms|text)\\s+(.+?)\\s*[:;]\\s*(.+)$")
+    private val naturalSms = Regex("(?iu)^(?:nh\\u1eafn(?:\\s+tin)?|nhan(?:\\s+tin)?)\\s+(?:cho\\s+)?(.+?)\\s+(?:l\\u00e0|la)\\s+(.+)$")
     private val dial = Regex("(?iu)^(?:g\\u1ecdi|call)\\s+(.+)$")
 
     fun parse(request: String): ToolCommand? {
@@ -26,7 +28,18 @@ object UserCommandParser {
             if (containsAny(normalized, "tat", "off")) return ToolCommand.FlashlightOff
             if (containsAny(normalized, "bat", "on")) return ToolCommand.FlashlightOn
         }
+        if (normalized == "pin" || normalized.startsWith("pin ") ||
+            normalized.contains("battery") || normalized.contains("trang thai thiet bi") ||
+            normalized.contains("device status") || normalized.contains("bao nhieu pin")
+        ) {
+            return ToolCommand.ReadDeviceState
+        }
         sms.matchEntire(request.trim())?.let { match ->
+            val recipient = match.groupValues[1].trim()
+            val message = match.groupValues[2].trim()
+            if (recipient.isNotBlank() && message.isNotBlank()) return ToolCommand.SendSms(recipient, message)
+        }
+        naturalSms.matchEntire(request.trim())?.let { match ->
             val recipient = match.groupValues[1].trim()
             val message = match.groupValues[2].trim()
             if (recipient.isNotBlank() && message.isNotBlank()) return ToolCommand.SendSms(recipient, message)
@@ -59,12 +72,20 @@ object UserCommandParser {
         }
         if (normalized.startsWith("mo ") || normalized.startsWith("open ")) {
             val app = request.substringAfter(' ', "").trim()
-            if (app.isNotBlank()) return ToolCommand.OpenApp(app)
+            if (app.isNotBlank() && !containsAny(normalized, "cai app", "app toi hay", "ung dung toi hay")) {
+                return ToolCommand.OpenApp(app)
+            }
         }
         if (normalized.contains("am luong") || normalized.contains("volume")) {
             val level = number.find(normalized)?.groupValues?.get(1)?.toIntOrNull()
             if (level != null && level in 0..100) {
                 return ToolCommand.SetVolume(streamFor(normalized), level)
+            }
+            if (containsAny(normalized, "tang", "up", "raise")) {
+                return ToolCommand.AdjustVolume(streamFor(normalized), VolumeAdjustment.UP)
+            }
+            if (containsAny(normalized, "giam", "down", "lower")) {
+                return ToolCommand.AdjustVolume(streamFor(normalized), VolumeAdjustment.DOWN)
             }
         }
         if (containsAny(normalized, "dung phat", "pause")) return ToolCommand.Media(MediaAction.PAUSE)

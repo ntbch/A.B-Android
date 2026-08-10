@@ -19,4 +19,17 @@
     <string name="model_ready_status">%1$s
 %2$s
 %3$s</string>
+    <string name="accessibility_service_label">A.B semantic accessibility</string>
+    <string name="accessibility_service_description">A.B reads semantic UI controls to perform verified actions.</string>
+    <string name="enable_accessibility">Bật semantic accessibility</string>
+    <string name="accessibility_settings_unavailable">Thiết bị không có màn hình cài đặt accessibility.</string>
+    <string name="voice_start">Bắt đầu voice PTT</string>
+    <string name="voice_stop_listening">Dừng nghe</string>
+    <string name="voice_processing">Đang xử lý voice</string>
+    <string name="voice_speaking">Đang nói</string>
+    <string name="voice_waiting_confirmation">Chờ xác nhận</string>
+    <string name="wake_word_start">Thiết lập wake word</string>
+    <string name="wake_word_stop">Wake word đang hoạt động</string>
+    <string name="wake_word_settings_unavailable">Không mở được cài đặt voice assistant.</string>
+    <string name="voice_interaction_service_label">A.B voice assistant</string>
 </resources>
