@@ -8,11 +8,167 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
+import java.util.ArrayDeque
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class AgentCoreTest {
+    @Test
+    fun boundedAgentUsesVerifiedObservationForTheNextDecision() {
+        val outputs = ArrayDeque(
+            listOf(
+                "{\"tool\":\"device_state\"}",
+                "{\"tool\":\"web_search\",\"query\":\"thời tiết Hà Nội\"}",
+                "Đã hoàn tất tác vụ.",
+            ),
+        )
+        val prompts = mutableListOf<String>()
+        val commands = mutableListOf<ToolCommand>()
+        val model = AgentModel { prompt, callback ->
+            prompts += prompt
+            callback(outputs.removeFirst())
+        }
+        val executor = object : ToolExecutor {
+            override fun requiredPermission(command: ToolCommand): String? = null
+            override fun isAvailable(command: ToolCommand) = true
+            override fun unavailableMessage(command: ToolCommand) = "unavailable"
+            override fun execute(command: ToolCommand): ToolExecutionResult {
+                commands += command
+                return ToolExecutionResult("verified ${command.toolNameForTest()}", verified = true)
+            }
+        }
+        var result: AgentCore.AgentResult? = null
+        val core = AgentCore(model, executor, toolExecutionExecutor = Executor { it.run() })
+
+        try {
+            core.run("kiểm tra pin rồi tìm kiếm thời tiết Hà Nội") { result = it }
+
+            assertEquals(
+                listOf(
+                    ToolCommand.ReadDeviceState,
+                    ToolCommand.WebSearch("thời tiết Hà Nội"),
+                ),
+                commands,
+            )
+            assertEquals(3, prompts.size)
+            assertTrue(prompts[1].contains("action=device_state"))
+            assertEquals(AgentCore.AgentResult.Final("Đã hoàn tất tác vụ."), result)
+        } finally {
+            core.close()
+        }
+    }
+
+    @Test
+    fun malformedToolOutputGetsOneConstrainedRepair() {
+        val outputs = ArrayDeque(
+            listOf(
+                "{\"tool\":\"device_state\",}",
+                "{\"tool\":\"device_state\"}",
+            ),
+        )
+        val prompts = mutableListOf<String>()
+        val model = AgentModel { prompt, callback ->
+            prompts += prompt
+            callback(outputs.removeFirst())
+        }
+        val executor = object : ToolExecutor {
+            override fun requiredPermission(command: ToolCommand): String? = null
+            override fun isAvailable(command: ToolCommand) = true
+            override fun unavailableMessage(command: ToolCommand) = "unavailable"
+            override fun execute(command: ToolCommand) = ToolExecutionResult("device state")
+        }
+        var result: AgentCore.AgentResult? = null
+        val core = AgentCore(model, executor, toolExecutionExecutor = Executor { it.run() })
+
+        try {
+            core.run("cho cái đèn phía sau máy sáng lên") { result = it }
+
+            assertEquals(2, prompts.size)
+            assertTrue(prompts[1].contains("previous response could not be parsed"))
+            assertEquals(AgentCore.AgentResult.Final("device state"), result)
+        } finally {
+            core.close()
+        }
+    }
+
+    @Test
+    fun boundedAgentGetsOneRecoveryTurnBeforeRepeatedActionStopsIt() {
+        val outputs = ArrayDeque(
+            listOf(
+                "{\"tool\":\"device_state\"}",
+                "{\"tool\":\"device_state\"}",
+                "Không cần thêm hành động.",
+            ),
+        )
+        val prompts = mutableListOf<String>()
+        val commands = mutableListOf<ToolCommand>()
+        val model = AgentModel { prompt, callback ->
+            prompts += prompt
+            callback(outputs.removeFirst())
+        }
+        val executor = object : ToolExecutor {
+            override fun requiredPermission(command: ToolCommand): String? = null
+            override fun isAvailable(command: ToolCommand) = true
+            override fun unavailableMessage(command: ToolCommand) = "unavailable"
+            override fun execute(command: ToolCommand): ToolExecutionResult {
+                commands += command
+                return ToolExecutionResult("battery 42%", verified = true)
+            }
+        }
+        var result: AgentCore.AgentResult? = null
+        val core = AgentCore(model, executor, toolExecutionExecutor = Executor { it.run() })
+
+        try {
+            core.run("battery then search weather Hanoi") { result = it }
+
+            assertEquals(listOf(ToolCommand.ReadDeviceState), commands)
+            assertEquals(3, prompts.size)
+            assertTrue(prompts[2].contains("Do not call device_state again."))
+            assertEquals(AgentCore.AgentResult.Final("Không cần thêm hành động."), result)
+        } finally {
+            core.close()
+        }
+    }
+
+    @Test
+    fun boundedAgentCapsRepairAndContinuationAtFiveModelDecisions() {
+        val outputs = ArrayDeque(
+            listOf(
+                "{\"tool\":\"device_state\"}",
+                "{\"tool\":\"unknown\"}",
+                "{\"tool\":\"flashlight\",\"action\":\"on\"}",
+                "{\"tool\":\"flashlight\",\"action\":\"off\"}",
+                "{\"tool\":\"media\",\"action\":\"play\"}",
+            ),
+        )
+        var modelCalls = 0
+        val model = AgentModel { _, callback ->
+            modelCalls += 1
+            callback(outputs.removeFirst())
+        }
+        val executor = object : ToolExecutor {
+            override fun requiredPermission(command: ToolCommand): String? = null
+            override fun isAvailable(command: ToolCommand) = true
+            override fun unavailableMessage(command: ToolCommand) = "unavailable"
+            override fun execute(command: ToolCommand) = ToolExecutionResult("ok")
+        }
+        var result: AgentCore.AgentResult? = null
+        val core = AgentCore(model, executor, toolExecutionExecutor = Executor { it.run() })
+
+        try {
+            core.run("battery then search weather Hanoi") { result = it }
+
+            assertEquals(5, modelCalls)
+            assertEquals(
+                AgentCore.AgentResult.Final("Tác vụ đã đạt giới hạn số quyết định AI an toàn."),
+                result,
+            )
+        } finally {
+            core.close()
+        }
+    }
+
     @Test
     fun stopsRepeatedFollowUpBeforeStepBudget() {
         val model = AgentModel { _, callback -> callback("{\"tool\":\"set_timer\",\"duration_minutes\":1}") }
@@ -186,4 +342,10 @@ class AgentCoreTest {
             outerExecutor.shutdownNow()
         }
     }
+}
+
+private fun ToolCommand.toolNameForTest(): String = when (this) {
+    ToolCommand.ReadDeviceState -> "device_state"
+    is ToolCommand.WebSearch -> "web_search"
+    else -> error("Unexpected tool for this test: $this")
 }

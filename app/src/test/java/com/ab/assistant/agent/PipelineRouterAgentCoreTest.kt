@@ -53,7 +53,7 @@ class PipelineRouterAgentCoreTest {
 
         assertEquals(1, model.metadata.size)
         assertTrue(model.metadata.single().promptCharacters > 0)
-        assertEquals(13, model.metadata.single().exposedToolCount)
+        assertEquals(17, model.metadata.single().exposedToolCount)
         assertEquals(1, model.metadata.single().modelDecisionIndex)
     }
 

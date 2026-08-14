@@ -8,6 +8,13 @@ enum class Capability {
     ACCESSIBILITY,
     VOICE,
     WAKE_WORD,
+    CAMERA,
+    LAUNCHER,
+    AUDIO,
+    ALARM,
+    BATTERY,
+    SMS,
+    DIALER,
 }
 
 enum class CapabilityState {
@@ -78,6 +85,13 @@ class CapabilityCoordinator {
         Capability.ACCESSIBILITY -> "Accessibility"
         Capability.VOICE -> "Voice"
         Capability.WAKE_WORD -> "Wake word"
+        Capability.CAMERA -> "Camera/đèn pin"
+        Capability.LAUNCHER -> "Mở ứng dụng"
+        Capability.AUDIO -> "Âm thanh"
+        Capability.ALARM -> "Đồng hồ"
+        Capability.BATTERY -> "Pin thiết bị"
+        Capability.SMS -> "SMS"
+        Capability.DIALER -> "Trình quay số"
     }
 
     private fun CapabilityState.label(): String = when (this) {

@@ -302,11 +302,13 @@ Java_com_ab_assistant_NativeBridge_generateWithMetrics(
         return to_jstring(env, generation_payload("ERROR: Model is not loaded.", nullptr));
     }
 
-    bool prompt_cache_hit = false;
-    size_t cached_tokens_count = 0;
-    const auto input_tokens = prepare_generation_input(request, &prompt_cache_hit, &cached_tokens_count);
+    // Some MNN architectures (including Qwen3.5 Omni) need model-specific
+    // prompt construction before tokenization. Passing pre-tokenized text into
+    // response() bypasses that path and can abort in the native tokenizer.
+    model->reset();
+    cached_prompt_tokens.clear();
     std::ostringstream response;
-    model->response(input_tokens, &response, "", max_new_tokens);
+    model->response(request, &response, "", max_new_tokens);
     const auto* context = model->getContext();
     if (context == nullptr || context->status == LlmStatus::INTERNAL_ERROR ||
             context->status == LlmStatus::TIMEOUT) {
@@ -318,9 +320,8 @@ Java_com_ab_assistant_NativeBridge_generateWithMetrics(
             generation_payload(
                     response.str(),
                     context,
-                    prompt_cache_hit,
-                    cached_tokens_count,
-                    static_cast<int>(cached_prompt_tokens.size())));
+                    false,
+                    0));
 }
 
 extern "C"

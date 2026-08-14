@@ -28,6 +28,29 @@ class PipelineRouterTest {
     }
 
     @Test
+    fun greetingsUseModelWithoutToolSchemas() {
+        assertEquals(RouteDecision.ModelTool(emptySet()), router.route("hello"))
+    }
+
+    @Test
+    fun phoneStateParaphrasesExposeOnlyDeviceSchemasToTheModel() {
+        assertEquals(
+            RouteDecision.ModelTool(setOf(ToolGroup.DEVICE_STATE)),
+            router.route("tell me the device details"),
+        )
+        assertEquals(
+            RouteDecision.ModelTool(setOf(ToolGroup.DEVICE_STATE)),
+            router.route("is this phone charging right now"),
+        )
+    }
+
+    @Test
+    fun explicitSequenceOrConditionRoutesToBoundedAgent() {
+        assertTrue(router.route("kiểm tra pin rồi tìm kiếm thời tiết Hà Nội") is RouteDecision.Agent)
+        assertTrue(router.route("nếu pin thấp thì bật đèn pin") is RouteDecision.Agent)
+    }
+
+    @Test
     fun naturalMessageParaphraseUsesTheDirectConfirmationPath() {
         assertEquals(
             RouteDecision.Direct(ToolCommand.SendSms("Nam", "10 phut nua toi").toToolCall()),

@@ -1,6 +1,7 @@
 package com.ab.assistant.accessibility
 
 import android.graphics.Rect
+import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.concurrent.atomic.AtomicLong
 
@@ -35,6 +36,66 @@ data class SemanticRef(
     val snapshotId: Long,
     val ref: String,
 )
+
+sealed interface UiAction {
+    data class Tap(val ref: SemanticRef) : UiAction
+    data class SetText(val ref: SemanticRef, val text: String) : UiAction
+    data class Scroll(val ref: SemanticRef, val forward: Boolean) : UiAction
+}
+
+data class UiActionResult(val dispatched: Boolean, val error: String? = null)
+
+object UiActionPostcondition {
+    /** A newer bounded snapshot is the generic minimum proof that a UI action had a visible effect. */
+    fun screenChanged(beforeSnapshotId: Long, after: SemanticUiSnapshot?): Boolean =
+        after?.snapshotId?.let { it > beforeSnapshotId } == true
+}
+
+/** Executes only refs from current snapshot; stale refs never reach Android actions. */
+class UiActionExecutor {
+    fun execute(snapshot: SemanticUiSnapshot?, root: AccessibilityNodeInfo?, action: UiAction): UiActionResult {
+        val current = snapshot ?: return UiActionResult(false, "No active UI snapshot.")
+        val ref = when (action) {
+            is UiAction.Tap -> action.ref
+            is UiAction.SetText -> action.ref
+            is UiAction.Scroll -> action.ref
+        }
+        if (ref.snapshotId != current.snapshotId) return UiActionResult(false, "Stale UI reference.")
+        val node = root?.findByRef(ref.ref) ?: return UiActionResult(false, "UI node is no longer available.")
+        return when (action) {
+            is UiAction.Tap -> UiActionResult(node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            is UiAction.SetText -> UiActionResult(
+                node.performAction(
+                    AccessibilityNodeInfo.ACTION_SET_TEXT,
+                    Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, action.text) },
+                ),
+            )
+            is UiAction.Scroll -> UiActionResult(
+                node.performAction(if (action.forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD),
+            )
+        }.let { result -> if (result.dispatched) result else UiActionResult(false, "Android rejected UI action.") }
+    }
+
+    private fun AccessibilityNodeInfo.findByRef(targetRef: String): AccessibilityNodeInfo? {
+        var index = 0
+        fun visit(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (index >= MAX_NODES || depth > MAX_DEPTH) return null
+            val ref = "@e${++index}"
+            if (ref == targetRef) return node
+            for (childIndex in 0 until node.childCount) {
+                if (index >= MAX_NODES) return null
+                node.getChild(childIndex)?.let { child -> visit(child, depth + 1)?.let { return it } }
+            }
+            return null
+        }
+        return visit(this, depth = 0)
+    }
+
+    private companion object {
+        const val MAX_NODES = 256
+        const val MAX_DEPTH = 24
+    }
+}
 
 sealed interface UiPostcondition {
     data class NodeExists(val selector: UiSelector) : UiPostcondition

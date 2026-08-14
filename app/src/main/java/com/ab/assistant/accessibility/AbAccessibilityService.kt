@@ -10,11 +10,16 @@ import com.ab.assistant.state.CapabilityState
 
 class AbAccessibilityService : AccessibilityService() {
     private val collector = AccessibilitySnapshotCollector()
+    private val actionExecutor = UiActionExecutor()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         connected = true
-        latestSnapshot = null
+        instance = this
+        synchronized(snapshotMonitor) {
+            latestSnapshot = null
+            snapshotMonitor.notifyAll()
+        }
         (application as? AbApplication)?.capabilityCoordinator?.set(Capability.ACCESSIBILITY, CapabilityState.READY)
     }
 
@@ -26,14 +31,21 @@ class AbAccessibilityService : AccessibilityService() {
         val packageName = root.packageName?.toString()
             ?.takeIf { it.isNotBlank() }
             ?: event.packageName?.toString().orEmpty()
-        latestSnapshot = collector.collect(root, packageName)
+        synchronized(snapshotMonitor) {
+            latestSnapshot = collector.collect(root, packageName)
+            snapshotMonitor.notifyAll()
+        }
     }
 
     override fun onInterrupt() = Unit
 
     override fun onUnbind(intent: Intent?): Boolean {
         connected = false
-        latestSnapshot = null
+        instance = null
+        synchronized(snapshotMonitor) {
+            latestSnapshot = null
+            snapshotMonitor.notifyAll()
+        }
         (application as? AbApplication)?.refreshCapabilities()
         return super.onUnbind(intent)
     }
@@ -49,6 +61,31 @@ class AbAccessibilityService : AccessibilityService() {
 
         fun latestSnapshot(): SemanticUiSnapshot? = latestSnapshot
 
+        /** Waits briefly for an event-produced screen snapshot; never treats performAction alone as success. */
+        fun awaitSnapshotAfter(snapshotId: Long, timeoutMs: Long): SemanticUiSnapshot? = synchronized(snapshotMonitor) {
+            val deadline = System.currentTimeMillis() + timeoutMs.coerceAtLeast(0)
+            while (latestSnapshot?.snapshotId?.let { it > snapshotId } != true) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) return@synchronized null
+                try {
+                    snapshotMonitor.wait(remaining)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@synchronized null
+                }
+            }
+            latestSnapshot
+        }
+
+        fun execute(action: UiAction): UiActionResult =
+            instance?.actionExecutor?.execute(latestSnapshot, instance?.rootInActiveWindow, action)
+                ?: UiActionResult(false, "Accessibility service is not connected.")
+
         fun settingsIntent(): Intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+
+        @Volatile
+        private var instance: AbAccessibilityService? = null
+
+        private val snapshotMonitor = Object()
     }
 }

@@ -30,6 +30,7 @@
     <string name="voice_waiting_confirmation">Chờ xác nhận</string>
     <string name="wake_word_start">Thiết lập wake word</string>
     <string name="wake_word_stop">Wake word đang hoạt động</string>
+    <string name="wake_word_unavailable">Wake word chưa sẵn sàng</string>
     <string name="wake_word_settings_unavailable">Không mở được cài đặt voice assistant.</string>
     <string name="voice_interaction_service_label">A.B voice assistant</string>
 </resources>

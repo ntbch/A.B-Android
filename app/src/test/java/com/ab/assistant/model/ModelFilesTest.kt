@@ -8,7 +8,7 @@ import org.junit.Test
 class ModelFilesTest {
 
     @Test
-    fun missingFiles_requiresMnnTextModelBundle() {
+    fun missingFiles_requiresOnlyTextModelBundle() {
         val filesDir = Files.createTempDirectory("ab-model-test").toFile()
         val modelDir = ModelFiles.directory(filesDir)
         assertTrue(modelDir.mkdirs())
@@ -22,8 +22,18 @@ class ModelFilesTest {
             "visual.mnn",
             "visual.mnn.weight",
         )
-            .forEach { Files.createFile(modelDir.toPath().resolve(it)) }
+            .forEach { Files.write(modelDir.toPath().resolve(it), "test-$it".toByteArray()) }
 
         assertEquals(emptyList<String>(), ModelFiles.missingFiles(filesDir))
+    }
+
+    @Test
+    fun emptyRequiredFileIsNotConsideredLoadable() {
+        val filesDir = Files.createTempDirectory("ab-empty-model-test").toFile()
+        val modelDir = ModelFiles.directory(filesDir)
+        assertTrue(modelDir.mkdirs())
+        ModelFiles.requiredFileNames.forEach { Files.createFile(modelDir.toPath().resolve(it)) }
+
+        assertEquals(ModelFiles.requiredFileNames, ModelFiles.missingFiles(filesDir))
     }
 }

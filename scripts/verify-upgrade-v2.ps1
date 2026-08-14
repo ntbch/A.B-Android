@@ -80,7 +80,9 @@ try {
             if (-not $SkipInstall) {
                 Invoke-ExternalChecked $adbPath @('-s', $DeviceSerial, 'install', '-r', $apk) 'ADB APK install'
             }
-            Invoke-ExternalChecked $adbPath @('-s', $DeviceSerial, 'shell', 'am', 'force-stop', $packageName) 'ADB force-stop'
+            # Force-stopping an app that owns an enabled AccessibilityService makes Android/MIUI
+            # revoke that service.  Keep the user's enabled state intact while performing the
+            # launch smoke check below.
             Invoke-ExternalChecked $adbPath @('-s', $DeviceSerial, 'shell', 'monkey', '-p', $packageName, '1') 'ADB app launch'
             Write-Host 'Installed and launched A.B on the selected device.'
             Write-Host 'Accessibility setting:'
@@ -95,6 +97,9 @@ try {
             $assistantReady = $voiceInteractionService -eq $expectedAssistant
             Register-Gate 'Accessibility service connected' $accessibilityReady $(if ($accessibilityReady) { $accessibilityServices } else { "enabled_accessibility_services=$accessibilityServices" })
             Register-Gate 'A.B selected as system assistant' $assistantReady $(if ($assistantReady) { $voiceInteractionService } else { "voice_interaction_service=$voiceInteractionService" })
+            $voiceInteractionDump = (& $adbPath -s $DeviceSerial shell dumpsys voiceinteraction) -join "`n"
+            $supportsAssist = $voiceInteractionDump -match [regex]::Escape('Supports assist=true')
+            Register-Gate 'A.B system-assist entrypoint enabled' $supportsAssist $(if ($supportsAssist) { 'VoiceInteractionService metadata supportsAssist=true' } else { 'VoiceInteractionService does not advertise supportsAssist=true' })
             $packageDump = (& $adbPath -s $DeviceSerial shell dumpsys package $packageName) -join "`n"
             $expectedSessionAction = 'android.service.voice.VoiceInteractionSessionService'
             $sessionRegistered = $packageDump -match [regex]::Escape('AbVoiceInteractionSessionService') -and

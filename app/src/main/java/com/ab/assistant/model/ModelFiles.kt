@@ -3,7 +3,7 @@ package com.ab.assistant.model
 import java.io.File
 
 object ModelFiles {
-    private val requiredFiles = listOf(
+    val requiredFileNames = listOf(
         "config.json",
         "llm_config.json",
         "llm.mnn",
@@ -17,7 +17,7 @@ object ModelFiles {
 
     fun configFile(filesDir: File) = File(directory(filesDir), "config.json")
 
-    fun missingFiles(filesDir: File): List<String> = requiredFiles.filterNot { fileName ->
-        File(directory(filesDir), fileName).isFile
+    fun missingFiles(filesDir: File): List<String> = requiredFileNames.filterNot { fileName ->
+        File(directory(filesDir), fileName).let { file -> file.isFile && file.length() > 0L }
     }
 }

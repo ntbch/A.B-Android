@@ -40,4 +40,33 @@ class TaskSessionStoreTest {
         assertTrue(states.contains(TaskState.CANCELLED))
         assertNotNull(store.begin("next"))
     }
+
+    @Test
+    fun storesBoundedVerifiedObservationsForTheActiveTask() {
+        val store = TaskSessionStore()
+        val taskId = store.begin("multi-step") ?: error("task was not started")
+
+        assertTrue(store.setRoute(taskId, "AGENT"))
+        repeat(6) { index ->
+            assertTrue(
+                store.recordObservation(
+                    taskId,
+                    TaskObservation(
+                        step = index + 1,
+                        action = "tool_$index",
+                        summary = "result_$index",
+                        ok = true,
+                        verified = true,
+                        code = "OK",
+                    ),
+                ),
+            )
+        }
+
+        val snapshot = store.snapshot()
+        assertEquals("AGENT", snapshot.route)
+        assertEquals(6, snapshot.decisionStep)
+        assertEquals(5, snapshot.observations.size)
+        assertEquals(2, snapshot.observations.first().step)
+    }
 }

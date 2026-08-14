@@ -13,3 +13,5 @@ local-models/
 .cache/
 .codegraph/
 compile_commands.json
+*.zip
+model-download/

@@ -1,20 +1,10 @@
 package com.ab.assistant.tools
 
+import com.ab.assistant.state.Capability
+
 typealias JsonObject = Map<String, Any?>
 
 enum class ToolRisk { LOW, INFORMATION, OUTBOUND }
-
-enum class Capability {
-    CAMERA,
-    LAUNCHER,
-    AUDIO,
-    ALARM,
-    NOTIFICATIONS,
-    CONTACTS,
-    NETWORK,
-    SMS,
-    DIALER,
-}
 
 enum class ConfirmationPolicy { NONE, REQUIRED }
 
@@ -67,7 +57,11 @@ internal object ToolSpecCatalog {
         ToolSpec("web_search", "Search the network and return bounded result summaries.", schema("query"), ToolRisk.INFORMATION, setOf(Capability.NETWORK), ConfirmationPolicy.NONE, INFORMATION_TIMEOUT_MS),
         ToolSpec("send_sms", "Send an SMS after deterministic confirmation.", schema("recipient", "message"), ToolRisk.OUTBOUND, setOf(Capability.SMS), ConfirmationPolicy.REQUIRED, INFORMATION_TIMEOUT_MS),
         ToolSpec("dial_contact", "Open the dialer for one resolved recipient.", schema("recipient"), ToolRisk.OUTBOUND, setOf(Capability.DIALER), ConfirmationPolicy.REQUIRED, DEVICE_TIMEOUT_MS),
-        ToolSpec("device_state", "Read bounded local battery/device state.", schema(), ToolRisk.INFORMATION, emptySet(), ConfirmationPolicy.NONE, DEVICE_TIMEOUT_MS),
+        ToolSpec("device_state", "Read bounded local battery/device state.", schema(), ToolRisk.INFORMATION, setOf(Capability.BATTERY), ConfirmationPolicy.NONE, DEVICE_TIMEOUT_MS),
+        ToolSpec("get_ui_snapshot", "Read the current bounded Accessibility semantic snapshot.", schema(), ToolRisk.INFORMATION, setOf(Capability.ACCESSIBILITY), ConfirmationPolicy.NONE, INFORMATION_TIMEOUT_MS),
+        ToolSpec("tap_ref", "Tap one reference from the current Accessibility snapshot.", schema("snapshot_id", "ref"), ToolRisk.OUTBOUND, setOf(Capability.ACCESSIBILITY), ConfirmationPolicy.REQUIRED, DEVICE_TIMEOUT_MS),
+        ToolSpec("input_text", "Enter text in one reference from the current Accessibility snapshot.", schema("snapshot_id", "ref", "text"), ToolRisk.OUTBOUND, setOf(Capability.ACCESSIBILITY), ConfirmationPolicy.REQUIRED, DEVICE_TIMEOUT_MS),
+        ToolSpec("scroll", "Scroll one reference from the current Accessibility snapshot.", schema("snapshot_id", "ref", "direction"), ToolRisk.LOW, setOf(Capability.ACCESSIBILITY), ConfirmationPolicy.NONE, DEVICE_TIMEOUT_MS),
     ).associateBy(ToolSpec::name)
 
     fun forName(name: String): ToolSpec? = specs[name]
@@ -89,6 +83,10 @@ private fun ToolCommand.toolName(): String = when (this) {
         is ToolCommand.SendSms -> "send_sms"
         is ToolCommand.DialContact -> "dial_contact"
         ToolCommand.ReadDeviceState -> "device_state"
+        ToolCommand.GetUiSnapshot -> "get_ui_snapshot"
+        is ToolCommand.TapUi -> "tap_ref"
+        is ToolCommand.InputUiText -> "input_text"
+        is ToolCommand.ScrollUi -> "scroll"
 }
 
 fun ToolCommand.toToolCall(): ToolCall = when (this) {
@@ -109,6 +107,10 @@ fun ToolCommand.toToolCall(): ToolCall = when (this) {
     is ToolCommand.SendSms -> ToolCall("send_sms", mapOf("recipient" to recipient, "message" to message))
     is ToolCommand.DialContact -> ToolCall("dial_contact", mapOf("recipient" to recipient))
     ToolCommand.ReadDeviceState -> ToolCall("device_state", emptyMap())
+    ToolCommand.GetUiSnapshot -> ToolCall("get_ui_snapshot", emptyMap())
+    is ToolCommand.TapUi -> ToolCall("tap_ref", mapOf("snapshot_id" to snapshotId, "ref" to ref))
+    is ToolCommand.InputUiText -> ToolCall("input_text", mapOf("snapshot_id" to snapshotId, "ref" to ref, "text" to text))
+    is ToolCommand.ScrollUi -> ToolCall("scroll", mapOf("snapshot_id" to snapshotId, "ref" to ref, "direction" to direction.name.lowercase()))
 }
 
 class TypedToolRegistry(private val delegate: ToolExecutor) {
@@ -183,6 +185,24 @@ private object ToolCallDecoder {
         }
         "dial_contact" -> call.arguments.exactKeys("recipient")?.string("recipient", 80)?.let(ToolCommand::DialContact)
         "device_state" -> call.arguments.exactKeys()?.let { ToolCommand.ReadDeviceState }
+        "get_ui_snapshot" -> call.arguments.exactKeys()?.let { ToolCommand.GetUiSnapshot }
+        "tap_ref" -> call.arguments.exactKeys("snapshot_id", "ref")?.let {
+            val snapshotId = it.long("snapshot_id", 1L..Long.MAX_VALUE)
+            val ref = it.semanticRef("ref")
+            if (snapshotId != null && ref != null) ToolCommand.TapUi(snapshotId, ref) else null
+        }
+        "input_text" -> call.arguments.exactKeys("snapshot_id", "ref", "text")?.let {
+            val snapshotId = it.long("snapshot_id", 1L..Long.MAX_VALUE)
+            val ref = it.semanticRef("ref")
+            val text = it.string("text", 500, allowBlank = true)
+            if (snapshotId != null && ref != null && text != null) ToolCommand.InputUiText(snapshotId, ref, text) else null
+        }
+        "scroll" -> call.arguments.exactKeys("snapshot_id", "ref", "direction")?.let {
+            val snapshotId = it.long("snapshot_id", 1L..Long.MAX_VALUE)
+            val ref = it.semanticRef("ref")
+            val direction = it.string("direction", 10)?.let { value -> UiScrollDirection.entries.firstOrNull { entry -> entry.name.lowercase() == value } }
+            if (snapshotId != null && ref != null && direction != null) ToolCommand.ScrollUi(snapshotId, ref, direction) else null
+        }
         else -> null
     }
 
@@ -207,6 +227,15 @@ private object ToolCallDecoder {
         val integer = value.toInt()
         return integer.takeIf { value.toDouble() == integer.toDouble() && it in range }
     }
+
+    private fun JsonObject.long(key: String, range: LongRange): Long? {
+        val value = this[key] as? Number ?: return null
+        val integer = value.toLong()
+        return integer.takeIf { value.toDouble() == integer.toDouble() && it in range }
+    }
+
+    private fun JsonObject.semanticRef(key: String): String? =
+        string(key, 16)?.takeIf { Regex("^@e[1-9]\\d{0,5}$").matches(it) }
 }
 
 private fun ToolExecutionResult.toToolResult(): ToolResult = ToolResult(

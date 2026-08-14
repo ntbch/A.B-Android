@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Application
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.provider.ContactsContract
 import android.util.Log
 import com.ab.assistant.accessibility.AbAccessibilityService
 import com.ab.assistant.agent.AgentCore
@@ -11,6 +12,10 @@ import com.ab.assistant.agent.PipelineRouter
 import com.ab.assistant.agent.ProceduralSkillLearner
 import com.ab.assistant.agent.SkillEngine
 import com.ab.assistant.model.MnnModelRuntime
+import com.ab.assistant.model.AbModelRelease
+import com.ab.assistant.model.ModelFiles
+import com.ab.assistant.model.ModelPackageManager
+import com.ab.assistant.model.ModelPackageState
 import com.ab.assistant.model.InferenceMetricsStore
 import com.ab.assistant.notifications.AbNotificationListenerService
 import com.ab.assistant.state.Capability
@@ -26,11 +31,25 @@ import com.ab.assistant.voice.AbVoiceInteractionService
 class AbApplication : Application() {
     val nativeBridge by lazy { NativeBridge() }
     val inferenceMetricsStore = InferenceMetricsStore()
+    val modelPackageManager by lazy {
+        ModelPackageManager(listOfNotNull(getExternalFilesDir(null), filesDir).distinct())
+    }
     val modelRuntime by lazy {
-        MnnModelRuntime(nativeBridge) { metrics ->
-            inferenceMetricsStore.publish(metrics)
-            Log.i("MnnModelRuntime", metrics.toJson())
-        }
+        MnnModelRuntime(
+            nativeBridge = nativeBridge,
+            metricsSink = { metrics ->
+                inferenceMetricsStore.publish(metrics)
+                Log.i("MnnModelRuntime", metrics.toJson())
+            },
+            packageVerifier = { base ->
+                val status = modelPackageManager.inspect(AbModelRelease.manifest)
+                if (status.state == ModelPackageState.READY && status.directory == ModelFiles.directory(base)) {
+                    null
+                } else {
+                    status.reason ?: "Untrusted or incomplete model package."
+                }
+            },
+        )
     }
     val taskSessionStore = TaskSessionStore()
     val capabilityCoordinator = CapabilityCoordinator()
@@ -152,10 +171,10 @@ class AbApplication : Application() {
         )
         capabilityCoordinator.set(
             Capability.CONTACTS,
-            if (checkSelfPermission(Manifest.permission.READ_CONTACTS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (packageManager.resolveContentProvider(ContactsContract.AUTHORITY, 0) != null) {
                 CapabilityState.READY
             } else {
-                CapabilityState.DISABLED
+                CapabilityState.DEGRADED
             },
         )
         capabilityCoordinator.set(
@@ -170,6 +189,7 @@ class AbApplication : Application() {
                 CapabilityState.DISABLED
             },
         )
+        toolRegistry.refreshCapabilityStates()
     }
 
     private fun isNetworkReady(): Boolean {

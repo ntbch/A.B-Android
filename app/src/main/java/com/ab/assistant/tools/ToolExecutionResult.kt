@@ -10,6 +10,7 @@ enum class ToolResultCode {
     AMBIGUOUS,
     NETWORK_UNAVAILABLE,
     NETWORK_ERROR,
+    POSTCONDITION_FAILED,
 }
 
 data class ToolExecutionResult(

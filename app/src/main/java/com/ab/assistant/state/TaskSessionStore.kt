@@ -18,6 +18,19 @@ data class TaskSessionSnapshot(
     val request: String?,
     val state: TaskState,
     val message: String? = null,
+    val route: String? = null,
+    val decisionStep: Int = 0,
+    val observations: List<TaskObservation> = emptyList(),
+)
+
+/** Bounded, verified evidence retained only for the active task. */
+data class TaskObservation(
+    val step: Int,
+    val action: String,
+    val summary: String,
+    val ok: Boolean,
+    val verified: Boolean,
+    val code: String,
 )
 
 class TaskSessionStore {
@@ -48,6 +61,17 @@ class TaskSessionStore {
         }
         publish(next)
         return true
+    }
+
+    fun setRoute(taskId: Long, route: String): Boolean = update(taskId) { current ->
+        current.copy(route = route)
+    }
+
+    fun recordObservation(taskId: Long, observation: TaskObservation): Boolean = update(taskId) { current ->
+        current.copy(
+            decisionStep = observation.step,
+            observations = (current.observations + observation).takeLast(MAX_OBSERVATIONS),
+        )
     }
 
     fun complete(taskId: Long, message: String? = null): Boolean =
@@ -85,6 +109,20 @@ class TaskSessionStore {
         return { synchronized(lock) { listeners -= listener } }
     }
 
+    private fun update(
+        taskId: Long,
+        transform: (TaskSessionSnapshot) -> TaskSessionSnapshot,
+    ): Boolean {
+        val next: TaskSessionSnapshot
+        synchronized(lock) {
+            if (current.taskId != taskId || !current.state.isActive) return false
+            next = transform(current)
+            current = next
+        }
+        publish(next)
+        return true
+    }
+
     private fun publish(snapshot: TaskSessionSnapshot) {
         val callbacks = synchronized(lock) { listeners.toList() }
         callbacks.forEach { callback -> runCatching { callback(snapshot) } }
@@ -95,4 +133,8 @@ class TaskSessionStore {
             this != TaskState.COMPLETED &&
             this != TaskState.FAILED &&
             this != TaskState.CANCELLED
+
+    private companion object {
+        const val MAX_OBSERVATIONS = 5
+    }
 }

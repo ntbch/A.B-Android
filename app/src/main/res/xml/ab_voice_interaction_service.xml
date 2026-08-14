@@ -3,5 +3,5 @@
     android:sessionService="com.ab.assistant.voice.AbVoiceInteractionSessionService"
     android:recognitionService=""
     android:settingsActivity="com.ab.assistant.MainActivity"
-    android:supportsAssist="false"
+    android:supportsAssist="true"
     android:supportsLocalInteraction="true" />

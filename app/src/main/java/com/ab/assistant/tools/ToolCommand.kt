@@ -15,6 +15,10 @@ sealed interface ToolCommand {
     data class SendSms(val recipient: String, val message: String) : ToolCommand
     data class DialContact(val recipient: String) : ToolCommand
     data object ReadDeviceState : ToolCommand
+    data object GetUiSnapshot : ToolCommand
+    data class TapUi(val snapshotId: Long, val ref: String) : ToolCommand
+    data class InputUiText(val snapshotId: Long, val ref: String, val text: String) : ToolCommand
+    data class ScrollUi(val snapshotId: Long, val ref: String, val direction: UiScrollDirection) : ToolCommand
 }
 
 enum class VolumeStream { MUSIC, RING, ALARM, NOTIFICATION }
@@ -22,3 +26,5 @@ enum class VolumeStream { MUSIC, RING, ALARM, NOTIFICATION }
 enum class VolumeAdjustment { UP, DOWN }
 
 enum class MediaAction { PLAY, PAUSE, NEXT, PREVIOUS }
+
+enum class UiScrollDirection { FORWARD, BACKWARD }

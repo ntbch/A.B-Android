@@ -6,6 +6,26 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AccessibilitySemanticsTest {
+
+    @Test
+    fun staleSemanticReferenceIsRejectedBeforeAndroidAction() {
+        val executor = UiActionExecutor()
+        val snapshot = snapshot(id = 7, packageName = "com.example", nodes = emptyList())
+
+        val result = executor.execute(snapshot, null, UiAction.Tap(SemanticRef(6, "@e1")))
+
+        assertFalse(result.dispatched)
+        assertEquals("Stale UI reference.", result.error)
+    }
+
+    @Test
+    fun uiActionRequiresNewerSnapshotForGenericVisiblePostcondition() {
+        val newer = snapshot(id = 8, packageName = "com.example", nodes = emptyList())
+
+        assertTrue(UiActionPostcondition.screenChanged(7, newer))
+        assertFalse(UiActionPostcondition.screenChanged(8, newer))
+        assertFalse(UiActionPostcondition.screenChanged(7, null))
+    }
     private val resolver = SemanticUiResolver()
 
     @Test

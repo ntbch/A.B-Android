@@ -1,5 +1,6 @@
 package com.ab.assistant.tools
 
+import com.ab.assistant.state.Capability
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -84,7 +85,29 @@ class TypedToolRegistryTest {
 
         assertEquals(ConfirmationPolicy.REQUIRED, spec.confirmation)
         assertEquals(ToolRisk.OUTBOUND, spec.risk)
+        assertEquals(setOf(Capability.SMS), spec.requiredCapabilities)
         assertFalse(spec.inputSchema.isEmpty())
+    }
+
+    @Test
+    fun deviceStateSpecUsesSharedCapabilityAuthority() {
+        val spec = TypedToolRegistry(fakeExecutor {}).spec(ToolCommand.ReadDeviceState)
+
+        assertEquals(setOf(Capability.BATTERY), spec.requiredCapabilities)
+    }
+
+    @Test
+    fun uiActionRequiresCurrentStrictSemanticReference() {
+        var received: ToolCommand? = null
+        val registry = TypedToolRegistry(fakeExecutor { command -> received = command })
+
+        val accepted = registry.execute(ToolCall("tap_ref", mapOf("snapshot_id" to 7L, "ref" to "@e12")))
+        val rejected = registry.execute(ToolCall("tap_ref", mapOf("snapshot_id" to 7L, "ref" to "button")))
+
+        assertEquals(ToolStatus.SUCCESS, accepted.status)
+        assertEquals(ToolCommand.TapUi(7L, "@e12"), received)
+        assertEquals(ToolStatus.REJECTED, rejected.status)
+        assertEquals("MALFORMED_ARGUMENTS", rejected.errorCode)
     }
 
     private fun fakeExecutor(onExecute: (ToolCommand) -> Unit): ToolExecutor = object : ToolExecutor {

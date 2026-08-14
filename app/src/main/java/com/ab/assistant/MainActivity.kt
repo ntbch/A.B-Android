@@ -16,6 +16,9 @@ import com.ab.assistant.accessibility.AbAccessibilityService
 import com.ab.assistant.agent.AgentCore
 import com.ab.assistant.agent.ModelRequestMetadata
 import com.ab.assistant.agent.PromptBuilder
+import com.ab.assistant.model.AbModelRelease
+import com.ab.assistant.model.ModelPackageState
+import com.ab.assistant.model.ZipModelPackageDownloader
 import com.ab.assistant.state.Capability
 import com.ab.assistant.state.CapabilityState
 import com.ab.assistant.state.TaskState
@@ -23,6 +26,7 @@ import com.ab.assistant.tools.ToolCommand
 import com.ab.assistant.notifications.AbNotificationListenerService
 import com.ab.assistant.voice.VoiceSessionState
 import com.ab.assistant.voice.WakeWordController
+import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
@@ -30,6 +34,7 @@ class MainActivity : Activity() {
         private const val runtimePermissionRequestCode = 1001
         private const val voicePermissionRequestCode = 1002
         private const val wakeWordPermissionRequestCode = 1003
+        private const val modelImportRequestCode = 1004
         const val backendBenchmarkExtra = "com.ab.assistant.BACKEND_BENCHMARK"
         const val schemaBenchmarkExtra = "com.ab.assistant.SCHEMA_BENCHMARK_COUNT"
     }
@@ -42,6 +47,7 @@ class MainActivity : Activity() {
     private lateinit var capabilitiesButton: Button
     private lateinit var notificationSettingsButton: Button
     private lateinit var accessibilitySettingsButton: Button
+    private lateinit var importModelButton: Button
     private lateinit var voiceButton: Button
     private lateinit var wakeWordButton: Button
     private lateinit var confirmButton: Button
@@ -56,6 +62,7 @@ class MainActivity : Activity() {
     private var removeCapabilityObserver: (() -> Unit)? = null
     private var removeVoiceObserver: (() -> Unit)? = null
     private var removeMetricsObserver: (() -> Unit)? = null
+    private val modelImportExecutor = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -95,14 +102,16 @@ class MainActivity : Activity() {
             text = getString(R.string.enable_accessibility)
             setOnClickListener { openAccessibilitySettings() }
         }
+        importModelButton = Button(this).apply {
+            text = "CHỌN GÓI MODEL (.zip)"
+            setOnClickListener { pickModelArchive() }
+        }
         voiceButton = Button(this).apply {
             text = getString(R.string.voice_start)
             setOnClickListener { toggleVoice() }
         }
         wakeWordButton = Button(this).apply {
-            text = getString(
-                if (WakeWordController.isActive(this@MainActivity)) R.string.wake_word_stop else R.string.wake_word_start,
-            )
+            text = getString(R.string.wake_word_start)
             setOnClickListener { toggleWakeWord() }
         }
         confirmButton = Button(this).apply {
@@ -127,6 +136,7 @@ class MainActivity : Activity() {
             addView(capabilitiesButton)
             addView(notificationSettingsButton)
             addView(accessibilitySettingsButton)
+            addView(importModelButton)
             addView(voiceButton)
             addView(wakeWordButton)
             addView(confirmButton)
@@ -154,9 +164,7 @@ class MainActivity : Activity() {
                 ) {
                     runButton.isEnabled = modelReady
                 }
-                wakeWordButton.text = getString(
-                    if (WakeWordController.isActive(this)) R.string.wake_word_stop else R.string.wake_word_start,
-                )
+                updateWakeWordButton(snapshot.state(Capability.WAKE_WORD))
             }
         }
         removeVoiceObserver = app.voiceCoordinator.observe { state ->
@@ -216,6 +224,7 @@ class MainActivity : Activity() {
         removeVoiceObserver = null
         removeMetricsObserver?.invoke()
         removeMetricsObserver = null
+        modelImportExecutor.shutdownNow()
         if (!WakeWordController.isActive(this)) {
             app.voiceCoordinator.stop()
         }
@@ -257,6 +266,35 @@ class MainActivity : Activity() {
             app.agentCore.cancel()
             pendingToolCommand = null
             statusView.text = getString(R.string.permission_denied)
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != modelImportRequestCode || resultCode != RESULT_OK) return
+        val uri = data?.data ?: run {
+            statusView.text = "Không chọn gói model."
+            return
+        }
+        statusView.text = "Đang kiểm tra và cài gói model..."
+        importModelButton.isEnabled = false
+        modelImportExecutor.execute {
+            val result = app.modelPackageManager.downloadAndInstall(
+                AbModelRelease.manifest,
+                ZipModelPackageDownloader { contentResolver.openInputStream(uri) },
+            )
+            runOnUiThread {
+                importModelButton.isEnabled = true
+                if (result.state != ModelPackageState.READY) {
+                    statusView.text = "Không cài được model: ${result.reason ?: "gói không hợp lệ"}"
+                    return@runOnUiThread
+                }
+                statusView.text = "Model hợp lệ. Đang nạp MNN..."
+                app.loadModel { loadResult -> runOnUiThread {
+                    statusView.text = getString(R.string.model_ready_status, AppText.title, app.nativeBridge.mnnVersion(), loadResult)
+                } }
+            }
         }
     }
 
@@ -404,6 +442,17 @@ class MainActivity : Activity() {
         startActivity(intent)
     }
 
+    private fun pickModelArchive() {
+        startActivityForResult(
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/zip"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            },
+            modelImportRequestCode,
+        )
+    }
+
     private fun openAccessibilitySettings() {
         val intent = AbAccessibilityService.settingsIntent()
         if (intent.resolveActivity(packageManager) == null) {
@@ -439,6 +488,17 @@ class MainActivity : Activity() {
         if (!WakeWordController.openAssistantSettings(this)) {
             statusView.text = getString(R.string.wake_word_settings_unavailable)
         }
+    }
+
+    private fun updateWakeWordButton(state: CapabilityState) {
+        wakeWordButton.text = getString(
+            when (state) {
+                CapabilityState.READY,
+                CapabilityState.CONNECTING -> R.string.wake_word_stop
+                CapabilityState.DEGRADED -> R.string.wake_word_unavailable
+                CapabilityState.DISABLED -> R.string.wake_word_start
+            },
+        )
     }
 
 }

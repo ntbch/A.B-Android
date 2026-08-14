@@ -16,8 +16,13 @@ import android.telephony.SmsManager
 import android.view.KeyEvent
 import com.ab.assistant.contacts.ContactMatch
 import com.ab.assistant.contacts.ContactLookup
+import com.ab.assistant.accessibility.AbAccessibilityService
+import com.ab.assistant.accessibility.SemanticRef
+import com.ab.assistant.accessibility.UiAction
 import com.ab.assistant.notifications.AbNotificationListenerService
 import com.ab.assistant.notifications.NotificationStore
+import com.ab.assistant.observability.AbLog
+import com.ab.assistant.observability.AbLogCategory
 import com.ab.assistant.web.BingRssSearchClient
 import com.ab.assistant.web.WebSearchClient
 import com.ab.assistant.web.WebSearchResponse
@@ -33,6 +38,27 @@ class ToolRegistry(
     private val webSearchClient: WebSearchClient = BingRssSearchClient(),
     private val capabilityCoordinator: CapabilityCoordinator? = null,
 ) : ToolExecutor {
+    /**
+     * Publishes real platform availability to A.B's one capability authority.
+     * Android runtime permissions remain a separate, requestable authorization gate.
+     */
+    fun refreshCapabilityStates() {
+        val coordinator = capabilityCoordinator ?: return
+        coordinator.set(Capability.CAMERA, availabilityState(flashlight.isAvailable()))
+        coordinator.set(Capability.LAUNCHER, availabilityState(launchableActivities().isNotEmpty()))
+        coordinator.set(Capability.AUDIO, availabilityState(audioManager() != null))
+        coordinator.set(
+            Capability.ALARM,
+            availabilityState(
+                hasHandler(Intent(AlarmClock.ACTION_SET_TIMER)) ||
+                    hasHandler(Intent(AlarmClock.ACTION_SET_ALARM)),
+            ),
+        )
+        coordinator.set(Capability.BATTERY, availabilityState(context.getSystemService(BatteryManager::class.java) != null))
+        coordinator.set(Capability.SMS, availabilityState(smsManager() != null))
+        coordinator.set(Capability.DIALER, availabilityState(hasHandler(Intent(Intent.ACTION_DIAL))))
+    }
+
     override fun requiredPermission(command: ToolCommand): String? = when (command) {
         ToolCommand.FlashlightOn, ToolCommand.FlashlightOff -> Manifest.permission.CAMERA
         is ToolCommand.FindContact -> Manifest.permission.READ_CONTACTS
@@ -61,7 +87,15 @@ class ToolRegistry(
         else -> "Cần cấp quyền để thực hiện yêu cầu này."
     }
 
-    override fun isAvailable(command: ToolCommand): Boolean = when (command) {
+    override fun isAvailable(command: ToolCommand): Boolean {
+        refreshCapabilityStates()
+        val capabilitiesReady = ToolSpecCatalog.forCommand(command).requiredCapabilities.all { capability ->
+            capabilityCoordinator?.isReady(capability) ?: true
+        }
+        return capabilitiesReady && directAvailability(command)
+    }
+
+    private fun directAvailability(command: ToolCommand): Boolean = when (command) {
         ToolCommand.FlashlightOn, ToolCommand.FlashlightOff -> flashlight.isAvailable()
         is ToolCommand.OpenApp -> launchableActivities().isNotEmpty()
         is ToolCommand.SetVolume, is ToolCommand.AdjustVolume, is ToolCommand.Media -> audioManager() != null
@@ -74,6 +108,8 @@ class ToolRegistry(
         is ToolCommand.SendSms -> smsManager() != null
         is ToolCommand.DialContact -> hasHandler(Intent(Intent.ACTION_DIAL))
         ToolCommand.ReadDeviceState -> context.getSystemService(BatteryManager::class.java) != null
+        ToolCommand.GetUiSnapshot -> AbAccessibilityService.isConnected()
+        is ToolCommand.TapUi, is ToolCommand.InputUiText, is ToolCommand.ScrollUi -> AbAccessibilityService.isConnected()
     }
 
     override fun unavailableMessage(command: ToolCommand): String = when (command) {
@@ -89,9 +125,13 @@ class ToolRegistry(
         is ToolCommand.WebSearch -> "Không có kết nối mạng để tìm kiếm."
         is ToolCommand.SendSms -> "Thiết bị không hỗ trợ gửi SMS."
         is ToolCommand.DialContact -> "Thiết bị không có ứng dụng quay số khả dụng."
+        ToolCommand.GetUiSnapshot -> "Accessibility chưa sẵn sàng."
+        is ToolCommand.TapUi, is ToolCommand.InputUiText, is ToolCommand.ScrollUi -> "Accessibility chưa sẵn sàng."
     }
 
-    override fun execute(command: ToolCommand): ToolExecutionResult = when (command) {
+    override fun execute(command: ToolCommand): ToolExecutionResult {
+        AbLog.event(AbLogCategory.TOOL, "execute", mapOf("tool" to command.toToolCall().name))
+        val result = when (command) {
         ToolCommand.FlashlightOn, ToolCommand.FlashlightOff -> flashlightResult(command)
         is ToolCommand.OpenApp -> openApp(command.appName)
         is ToolCommand.SetVolume -> setVolume(command)
@@ -105,14 +145,29 @@ class ToolRegistry(
         is ToolCommand.SendSms -> sendSms(command)
         is ToolCommand.DialContact -> dialContact(command.recipient)
         ToolCommand.ReadDeviceState -> readDeviceState()
+        ToolCommand.GetUiSnapshot -> readUiSnapshot()
+        is ToolCommand.TapUi -> executeUiAction(UiAction.Tap(SemanticRef(command.snapshotId, command.ref)))
+        is ToolCommand.InputUiText -> executeUiAction(UiAction.SetText(SemanticRef(command.snapshotId, command.ref), command.text))
+        is ToolCommand.ScrollUi -> executeUiAction(
+            UiAction.Scroll(SemanticRef(command.snapshotId, command.ref), command.direction == UiScrollDirection.FORWARD),
+        )
+        }
+        AbLog.event(
+            AbLogCategory.TOOL,
+            "result",
+            mapOf("tool" to command.toToolCall().name, "ok" to result.ok, "code" to result.code.name, "verified" to result.verified),
+        )
+        return result
     }
 
     override fun requiresConfirmation(command: ToolCommand): Boolean =
-        command is ToolCommand.SendSms || command is ToolCommand.DialContact
+        ToolSpecCatalog.forCommand(command).confirmation == ConfirmationPolicy.REQUIRED
 
     override fun confirmationMessage(command: ToolCommand): String = when (command) {
         is ToolCommand.SendSms -> "Xác nhận gửi SMS tới “${command.recipient}”:\n${command.message}"
         is ToolCommand.DialContact -> "Xác nhận mở trình quay số cho “${command.recipient}”."
+        is ToolCommand.TapUi -> "Xác nhận chạm phần tử ${command.ref} trên màn hình hiện tại."
+        is ToolCommand.InputUiText -> "Xác nhận nhập nội dung vào phần tử ${command.ref} trên màn hình hiện tại:\n${command.text}"
         else -> super.confirmationMessage(command)
     }
 
@@ -237,6 +292,47 @@ class ToolRegistry(
         val status = battery?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
         val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
         return ToolExecutionResult("Battery $level%, ${if (charging) "charging" else "not charging"}.")
+    }
+
+    private fun readUiSnapshot(): ToolExecutionResult {
+        val snapshot = AbAccessibilityService.latestSnapshot()
+            ?: return ToolExecutionResult("Chưa có ảnh chụp semantic UI.", ok = false, code = ToolResultCode.NOT_AVAILABLE)
+        val nodes = snapshot.nodes.joinToString("\n") { node ->
+            "${node.ref} role=${node.role} text=${node.text.orEmpty().take(80)} desc=${node.contentDescription.orEmpty().take(80)} id=${node.resourceId.orEmpty()}"
+        }
+        return ToolExecutionResult(
+            "UI snapshot=${snapshot.snapshotId}; package=${snapshot.packageName}; truncated=${snapshot.truncated}\n$nodes",
+            verified = true,
+        )
+    }
+
+    private fun executeUiAction(action: UiAction): ToolExecutionResult {
+        val result = AbAccessibilityService.execute(action)
+        val beforeSnapshotId = when (action) {
+            is UiAction.Tap -> action.ref.snapshotId
+            is UiAction.SetText -> action.ref.snapshotId
+            is UiAction.Scroll -> action.ref.snapshotId
+        }
+        return if (result.dispatched) {
+            val after = AbAccessibilityService.awaitSnapshotAfter(beforeSnapshotId, UI_POSTCONDITION_TIMEOUT_MS)
+            if (com.ab.assistant.accessibility.UiActionPostcondition.screenChanged(beforeSnapshotId, after)) {
+                ToolExecutionResult("Đã xác minh màn hình thay đổi sau UI action.", verified = true)
+            } else {
+                ToolExecutionResult(
+                    "UI action đã gửi nhưng không quan sát được thay đổi màn hình.",
+                    ok = false,
+                    code = ToolResultCode.POSTCONDITION_FAILED,
+                    verified = false,
+                )
+            }
+        } else {
+            ToolExecutionResult(
+                result.error ?: "UI action bị hệ thống từ chối.",
+                ok = false,
+                code = ToolResultCode.NOT_AVAILABLE,
+                verified = false,
+            )
+        }
     }
 
     private fun media(action: MediaAction): ToolExecutionResult {
@@ -431,6 +527,9 @@ class ToolRegistry(
         .replace('đ', 'd')
         .trim()
 
+    private fun availabilityState(available: Boolean): com.ab.assistant.state.CapabilityState =
+        if (available) com.ab.assistant.state.CapabilityState.READY else com.ab.assistant.state.CapabilityState.DEGRADED
+
     private data class LaunchableActivity(val label: String, val packageName: String, val activityName: String)
 
     private sealed interface RecipientResolution {
@@ -441,5 +540,6 @@ class ToolRegistry(
 
     private companion object {
         const val MAX_NOTIFICATION_TEXT = 180
+        const val UI_POSTCONDITION_TIMEOUT_MS = 1_500L
     }
 }

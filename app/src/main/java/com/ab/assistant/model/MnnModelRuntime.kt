@@ -22,12 +22,18 @@ class MnnModelRuntime(
     private val metricsSink: (InferenceMetrics) -> Unit = { metrics ->
         Log.i(TAG, metrics.toJson())
     },
+    private val packageVerifier: (File) -> String? = { null },
 ) : Closeable, InstrumentedAgentModel {
     private val nativeGenerationRunning = AtomicBoolean(false)
     private val firstGeneration = AtomicBoolean(true)
+    private val stateStore = MnnRuntimeStateStore()
     @Volatile private var backendActual: String? = null
     @Volatile private var lastModelLoadMs: Long? = null
     @Volatile private var activeBackendRequested: String = BACKEND_REQUEST_ORDER
+
+    fun state(): MnnRuntimeSnapshot = stateStore.snapshot()
+
+    fun observeState(listener: (MnnRuntimeSnapshot) -> Unit): () -> Unit = stateStore.observe(listener)
 
     fun load(filesDir: File, onComplete: (String) -> Unit) = loadInternal(
         filesDir = filesDir,
@@ -60,15 +66,23 @@ class MnnModelRuntime(
     ) {
         val requestId = UUID.randomUUID().toString()
         val totalStartedAt = System.nanoTime()
+        stateStore.transition(MnnRuntimeState.LOADING, backend = null)
         executor.execute {
             activeBackendRequested = backendRequested
             val modelDir = ModelFiles.directory(filesDir)
             if (!modelDir.exists() && !modelDir.mkdirs()) {
+                stateStore.transition(MnnRuntimeState.ERROR, error = "Cannot create model directory.")
                 onComplete("ERROR: Cannot create model directory.")
+                return@execute
+            }
+            packageVerifier(filesDir)?.let { error ->
+                stateStore.transition(MnnRuntimeState.ERROR, error = error)
+                onComplete("Model package invalid: $error")
                 return@execute
             }
             val missingFiles = ModelFiles.missingFiles(filesDir)
             if (missingFiles.isNotEmpty()) {
+                stateStore.transition(MnnRuntimeState.ERROR, error = "Model package is incomplete.")
                 onComplete("Model missing: ${missingFiles.joinToString()}")
                 return@execute
             }
@@ -77,6 +91,7 @@ class MnnModelRuntime(
                 .replace("[^a-z0-9_-]".toRegex(), "_")
             val cacheDir = File(filesDir, "mnn-cache-$cacheKey")
             if (!cacheDir.exists() && !cacheDir.mkdirs()) {
+                stateStore.transition(MnnRuntimeState.ERROR, error = "Cannot create MNN cache directory.")
                 onComplete("ERROR: Cannot create MNN cache directory.")
                 return@execute
             }
@@ -85,6 +100,11 @@ class MnnModelRuntime(
             val result = nativeLoad(ModelFiles.configFile(filesDir).absolutePath, cacheDir.absolutePath)
             val loadMs = elapsedMs(loadStartedAt)
             backendActual = result.takeIf { it == "OPENCL" || it == "VULKAN" || it == "CPU" }
+            if (backendActual == null) {
+                stateStore.transition(MnnRuntimeState.ERROR, error = result)
+            } else {
+                stateStore.transition(MnnRuntimeState.READY, backend = backendActual)
+            }
             lastModelLoadMs = loadMs
             firstGeneration.set(true)
             record(
@@ -125,20 +145,24 @@ class MnnModelRuntime(
         metadata: ModelRequestMetadata,
         onComplete: (String) -> Unit,
     ) {
+        if (stateStore.snapshot().state != MnnRuntimeState.READY) {
+            onComplete("ERROR: Local model runtime is unavailable.")
+            return
+        }
         if (!nativeGenerationRunning.compareAndSet(false, true)) {
             onComplete("ERROR: The local model is still finishing the previous request.")
             return
         }
         val completed = AtomicBoolean(false)
+        stateStore.transition(MnnRuntimeState.GENERATING, backend = backendActual)
         val requestId = UUID.randomUUID().toString()
         val totalStartedAt = System.nanoTime()
         try {
-            val timeout = timeoutExecutor.schedule({
-                if (completed.compareAndSet(false, true)) {
-                    recordGeneration(requestId, elapsedMs(totalStartedAt), elapsedMs(totalStartedAt), metadata)
-                    onComplete("ERROR: Local generation timed out. Please try a shorter request.")
+            val generationWarning = timeoutExecutor.schedule({
+                if (!completed.get()) {
+                    Log.w(TAG, "Local generation exceeded $GENERATION_WARNING_SECONDS seconds; waiting for native completion before another request.")
                 }
-            }, GENERATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            }, GENERATION_WARNING_SECONDS, TimeUnit.SECONDS)
             executor.execute {
                 val generationStartedAt = System.nanoTime()
                 try {
@@ -153,21 +177,35 @@ class MnnModelRuntime(
                             metadata = metadata,
                             nativeResult = nativeResult,
                         )
+                        // Agent callbacks can synchronously schedule the next decision. Release the
+                        // JNI slot first so that a valid continuation never sees a false busy state.
+                        nativeGenerationRunning.set(false)
+                        stateStore.transition(MnnRuntimeState.READY, backend = backendActual)
+                        generationWarning.cancel(false)
                         onComplete(result)
                     }
-                } finally {
-                    nativeGenerationRunning.set(false)
-                    timeout.cancel(false)
+                    } finally {
+                        nativeGenerationRunning.set(false)
+                        if (stateStore.snapshot().state == MnnRuntimeState.GENERATING) {
+                            stateStore.transition(MnnRuntimeState.READY, backend = backendActual)
+                        }
+                        generationWarning.cancel(false)
                 }
             }
         } catch (_: RuntimeException) {
             nativeGenerationRunning.set(false)
+            stateStore.transition(MnnRuntimeState.ERROR, backend = backendActual, error = "Local model runtime is unavailable.")
             onComplete("ERROR: Local model runtime is unavailable.")
         }
     }
 
     override fun close() {
-        executor.execute(nativeBridge::unloadModel)
+        stateStore.transition(MnnRuntimeState.UNLOADING, backend = backendActual)
+        executor.execute {
+            nativeBridge.unloadModel()
+            backendActual = null
+            stateStore.transition(MnnRuntimeState.UNINITIALIZED)
+        }
         executor.shutdown()
         timeoutExecutor.shutdownNow()
     }
@@ -229,7 +267,8 @@ class MnnModelRuntime(
         private const val TAG = "MnnModelRuntime"
         private const val BACKEND_REQUEST_ORDER = "CPU,OPENCL,VULKAN"
         private const val MODEL_MAX_NEW_TOKENS = 32
-        private const val GENERATION_TIMEOUT_SECONDS = 35L
+        /** JNI generation cannot be cancelled safely. This is telemetry, not an early callback. */
+        private const val GENERATION_WARNING_SECONDS = 35L
         private val SUPPORTED_BACKENDS = setOf("opencl", "vulkan", "cpu")
     }
 }

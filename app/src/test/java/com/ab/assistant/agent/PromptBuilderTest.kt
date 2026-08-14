@@ -1,5 +1,6 @@
 package com.ab.assistant.agent
 
+import com.ab.assistant.state.TaskObservation
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,9 +29,18 @@ class PromptBuilderTest {
     }
 
     @Test
+    fun conversationalPromptHasNoToolSchemas() {
+        val prompt = builder.initial("hello", emptySet())
+
+        assertFalse(prompt.contains("{\"tool\":"))
+        assertTrue(prompt.contains("Do not output JSON"))
+    }
+
+    @Test
     fun exposedToolCountMatchesScopedSchemas() {
         assertTrue(builder.exposedToolCount(setOf(ToolGroup.COMMUNICATION)) == 2)
-        assertTrue(builder.exposedToolCount(setOf(ToolGroup.DEVICE, ToolGroup.INFORMATION)) == 11)
+        assertTrue(builder.exposedToolCount(setOf(ToolGroup.DEVICE, ToolGroup.INFORMATION)) == 10)
+        assertTrue(builder.exposedToolCount(setOf(ToolGroup.DEVICE_STATE)) == 1)
     }
 
     @Test
@@ -40,5 +50,21 @@ class PromptBuilderTest {
             assertTrue(prompt.lines().count { it.startsWith("{\"tool\":") } == count)
         }
         assertTrue(builder.benchmarkSchemaCount() >= 16)
+    }
+
+    @Test
+    fun agentContinuationCarriesBoundedVerifiedEvidence() {
+        val prompt = builder.agentAfterTool(
+            userRequest = "kiểm tra pin rồi tìm kiếm thời tiết",
+            observations = listOf(
+                TaskObservation(1, "device_state", "pin 42%", ok = true, verified = true, code = "OK"),
+            ),
+            remainingToolDecisions = 4,
+            exposedToolGroups = setOf(ToolGroup.DEVICE, ToolGroup.INFORMATION),
+        )
+
+        assertTrue(prompt.contains("action=device_state"))
+        assertTrue(prompt.contains("at most 4 additional"))
+        assertTrue(prompt.contains("\"tool\":\"web_search\""))
     }
 }
